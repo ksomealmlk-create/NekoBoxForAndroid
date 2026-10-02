@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.RemoteException
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.MenuItem
 import androidx.activity.addCallback
@@ -19,6 +20,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.navigation.NavigationView
 import com.google.android.material.snackbar.Snackbar
 import io.nekohasekai.sagernet.BuildConfig
+import io.nekohasekai.sagernet.FloatingToggleService
 import io.nekohasekai.sagernet.GroupType
 import io.nekohasekai.sagernet.Key
 import io.nekohasekai.sagernet.R
@@ -105,6 +107,16 @@ class MainActivity : ThemedActivity(),
 
         refreshNavMenu(DataStore.enableClashAPI)
 
+        // الأيقونة العائمة: طلب الصلاحية
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        }
+
         // sdk 33 notification
         if (Build.VERSION.SDK_INT >= 33) {
             val checkPermission =
@@ -123,6 +135,14 @@ class MainActivity : ThemedActivity(),
                 .setMessage(R.string.preview_version_hint)
                 .setPositiveButton(android.R.string.ok, null)
                 .show()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // الأيقونة العائمة: تشغيل الخدمة إذا الصلاحية ممنوحة
+        if (Settings.canDrawOverlays(this)) {
+            startService(Intent(this, FloatingToggleService::class.java))
         }
     }
 
