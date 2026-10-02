@@ -1,352 +1,500 @@
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
-    android:installLocation="internalOnly">
+package io.nekohasekai.sagernet.ui
 
-    <uses-sdk tools:overrideLibrary="com.google.zxing.client.android, com.blacksquircle.ui.editorkit" />
+import android.Manifest.permission.POST_NOTIFICATIONS
+import android.annotation.SuppressLint
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.RemoteException
+import android.provider.Settings
+import android.view.KeyEvent
+import android.view.MenuItem
+import androidx.activity.addCallback
+import androidx.annotation.IdRes
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.preference.PreferenceDataStore
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.navigation.NavigationView
+import com.google.android.material.snackbar.Snackbar
+import io.nekohasekai.sagernet.BuildConfig
+import io.nekohasekai.sagernet.FloatingToggleService
+import io.nekohasekai.sagernet.GroupType
+import io.nekohasekai.sagernet.Key
+import io.nekohasekai.sagernet.R
+import io.nekohasekai.sagernet.SagerNet
+import io.nekohasekai.sagernet.aidl.ISagerNetService
+import io.nekohasekai.sagernet.aidl.SpeedDisplayData
+import io.nekohasekai.sagernet.aidl.TrafficData
+import io.nekohasekai.sagernet.bg.BaseService
+import io.nekohasekai.sagernet.bg.SagerConnection
+import io.nekohasekai.sagernet.database.DataStore
+import io.nekohasekai.sagernet.database.GroupManager
+import io.nekohasekai.sagernet.database.ProfileManager
+import io.nekohasekai.sagernet.database.ProxyGroup
+import io.nekohasekai.sagernet.database.SubscriptionBean
+import io.nekohasekai.sagernet.database.preference.OnPreferenceDataStoreChangeListener
+import io.nekohasekai.sagernet.databinding.LayoutMainBinding
+import io.nekohasekai.sagernet.fmt.AbstractBean
+import io.nekohasekai.sagernet.fmt.KryoConverters
+import io.nekohasekai.sagernet.fmt.PluginEntry
+import io.nekohasekai.sagernet.group.GroupInterfaceAdapter
+import io.nekohasekai.sagernet.group.GroupUpdater
+import io.nekohasekai.sagernet.ktx.alert
+import io.nekohasekai.sagernet.ktx.isPlay
+import io.nekohasekai.sagernet.ktx.isPreview
+import io.nekohasekai.sagernet.ktx.launchCustomTab
+import io.nekohasekai.sagernet.ktx.onMainDispatcher
+import io.nekohasekai.sagernet.ktx.parseProxies
+import io.nekohasekai.sagernet.ktx.readableMessage
+import io.nekohasekai.sagernet.ktx.runOnDefaultDispatcher
+import moe.matsuri.nb4a.utils.Util
 
-    <permission
-        android:name="${applicationId}.SERVICE"
-        android:protectionLevel="signature" />
+class MainActivity : ThemedActivity(),
+    SagerConnection.Callback,
+    OnPreferenceDataStoreChangeListener,
+    NavigationView.OnNavigationItemSelectedListener {
 
-    <uses-permission android:name="${applicationId}.SERVICE" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    lateinit var binding: LayoutMainBinding
+    lateinit var navigation: NavigationView
 
-    <uses-permission
-        android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="PackageVisibilityPolicy" />
-    <uses-permission android:name="com.android.permission.GET_INSTALLED_APPS" />
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+        binding = LayoutMainBinding.inflate(layoutInflater)
+        binding.fab.initProgress(binding.fabProgress)
+        if (themeResId !in intArrayOf(
+                R.style.Theme_SagerNet_Black
+            )
+        ) {
+            navigation = binding.navView
+            binding.drawerLayout.removeView(binding.navViewBlack)
+        } else {
+            navigation = binding.navViewBlack
+            binding.drawerLayout.removeView(binding.navView)
+        }
+        navigation.setNavigationItemSelectedListener(this)
 
-    <uses-feature
-        android:name="android.software.leanback"
-        android:required="false" />
-    <uses-feature
-        android:name="android.hardware.touchscreen"
-        android:required="false" />
-    <uses-feature
-        android:name="android.hardware.camera"
-        android:required="false" />
-    <uses-feature
-        android:name="android.hardware.camera.autofocus"
-        android:required="false" />
+        if (savedInstanceState == null) {
+            displayFragmentWithId(R.id.nav_configuration)
+        }
+        onBackPressedDispatcher.addCallback {
+            if (supportFragmentManager.findFragmentById(R.id.fragment_holder) is ConfigurationFragment) {
+                moveTaskToBack(true)
+            } else {
+                displayFragmentWithId(R.id.nav_configuration)
+            }
+        }
 
-    <queries>
-        <intent>
-            <action android:name="io.nekohasekai.sagernet.plugin.ACTION_NATIVE_PLUGIN" />
-        </intent>
-    </queries>
+        binding.fab.setOnClickListener {
+            if (DataStore.serviceState.canStop) SagerNet.stopService() else connect.launch(
+                null
+            )
+        }
+        binding.stats.setOnClickListener { if (DataStore.serviceState.connected) binding.stats.testConnection() }
 
-    <application
-        android:name="io.nekohasekai.sagernet.SagerNet"
-        android:allowBackup="true"
-        android:autoRevokePermissions="allowed"
-        android:banner="@mipmap/ic_launcher"
-        android:dataExtractionRules="@xml/backup_rules"
-        android:fullBackupContent="@xml/backup_descriptor"
-        android:fullBackupOnly="true"
-        android:hardwareAccelerated="true"
-        android:hasFragileUserData="true"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
-        android:largeHeap="true"
-        android:networkSecurityConfig="@xml/network_security_config"
-        android:roundIcon="@mipmap/ic_launcher"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.Start">
-        <meta-data
-            android:name="android.app.shortcuts"
-            android:resource="@xml/shortcuts" />
+        setContentView(binding.root)
+        changeState(BaseService.State.Idle)
+        connection.connect(this, this)
+        DataStore.configurationStore.registerChangeListener(this)
+        GroupManager.userInterface = GroupInterfaceAdapter(this)
 
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.BlankActivity"
-            android:configChanges="uiMode" />
+        if (intent?.action == Intent.ACTION_VIEW) {
+            onNewIntent(intent)
+        }
 
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.MainActivity"
-            android:configChanges="uiMode"
-            android:exported="true"
-            android:launchMode="singleTask">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
+        refreshNavMenu(DataStore.enableClashAPI)
 
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+        // الأيقونة العائمة: طلب الصلاحية
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        }
 
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
+        // sdk 33 notification
+        if (Build.VERSION.SDK_INT >= 33) {
+            val checkPermission =
+                ContextCompat.checkSelfPermission(this@MainActivity, POST_NOTIFICATIONS)
+            if (checkPermission != PackageManager.PERMISSION_GRANTED) {
+                //动态申请
+                ActivityCompat.requestPermissions(
+                    this@MainActivity, arrayOf(POST_NOTIFICATIONS), 0
+                )
+            }
+        }
 
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
-            </intent-filter>
+        if (isPreview) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(BuildConfig.PRE_VERSION_NAME)
+                .setMessage(R.string.preview_version_hint)
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+        }
+    }
 
-            <intent-filter android:label="@string/subscription_import">
-                <action android:name="android.intent.action.VIEW" />
+    override fun onResume() {
+        super.onResume()
+        // الأيقونة العائمة: تشغيل الخدمة إذا الصلاحية ممنوحة
+        if (Settings.canDrawOverlays(this)) {
+            startService(Intent(this, FloatingToggleService::class.java))
+        }
+    }
 
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
+    fun refreshNavMenu(clashApi: Boolean) {
+        if (::navigation.isInitialized) {
+            navigation.menu.findItem(R.id.nav_traffic)?.isVisible = clashApi
+            navigation.menu.findItem(R.id.nav_tuiguang)?.isVisible = !isPlay
+        }
+    }
 
-                <data
-                    android:host="subscription"
-                    android:scheme="sn" />
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
 
-            </intent-filter>
+        val uri = intent.data ?: return
 
-            <intent-filter android:label="@string/subscription_import">
-                <action android:name="android.intent.action.VIEW" />
+        runOnDefaultDispatcher {
+            if (uri.scheme == "sn" && uri.host == "subscription" || uri.scheme == "clash") {
+                importSubscription(uri)
+            } else {
+                importProfile(uri)
+            }
+        }
+    }
 
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
+    fun urlTest(): Int {
+        if (!DataStore.serviceState.connected || connection.service == null) {
+            error("not started")
+        }
+        return connection.service!!.urlTest()
+    }
 
-                <data
-                    android:host="install-config"
-                    android:scheme="clash" />
-            </intent-filter>
+    suspend fun importSubscription(uri: Uri) {
+        val group: ProxyGroup
 
-            <intent-filter android:label="@string/profile_import">
-                <action android:name="android.intent.action.VIEW" />
+        val url = uri.getQueryParameter("url")
+        if (!url.isNullOrBlank()) {
+            group = ProxyGroup(type = GroupType.SUBSCRIPTION)
+            val subscription = SubscriptionBean()
+            group.subscription = subscription
 
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
+            // cleartext format
+            subscription.link = url
+            group.name = uri.getQueryParameter("name")
+        } else {
+            val data = uri.encodedQuery.takeIf { !it.isNullOrBlank() } ?: return
+            try {
+                group = KryoConverters.deserialize(
+                    ProxyGroup().apply { export = true }, Util.zlibDecompress(Util.b64Decode(data))
+                ).apply {
+                    export = false
+                }
+            } catch (e: Exception) {
+                onMainDispatcher {
+                    alert(e.readableMessage).show()
+                }
+                return
+            }
+        }
 
-                <data android:scheme="sn" />
-                <data android:scheme="ss" />
-                <data android:scheme="ssr" />
-                <data android:scheme="socks" />
-                <data android:scheme="socks4" />
-                <data android:scheme="socksa" />
-                <data android:scheme="sock5" />
-                <data android:scheme="vmess" />
-                <data android:scheme="trojan" />
-                <data android:scheme="trojan-go" />
-                <data android:scheme="naive+https" />
-                <data android:scheme="naive+quic" />
-                <data android:scheme="hysteria" />
+        val name = group.name.takeIf { !it.isNullOrBlank() } ?: group.subscription?.link
+        ?: group.subscription?.token
+        if (name.isNullOrBlank()) return
 
-            </intent-filter>
+        group.name = group.name.takeIf { !it.isNullOrBlank() }
+            ?: ("Subscription #" + System.currentTimeMillis())
 
-            <meta-data
-                android:name="android.app.shortcuts"
-                android:resource="@xml/shortcuts" />
-        </activity>
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.VpnRequestActivity"
-            android:excludeFromRecents="true"
-            android:taskAffinity="" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.ConfigEditActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.SocksSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.HttpSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.ShadowsocksSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.VMessSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.TrojanSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.TrojanGoSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.MieruSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.NaiveSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.HysteriaSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.SSHSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.WireGuardSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.TuicSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.profile.ChainSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="moe.matsuri.nb4a.proxy.shadowtls.ShadowTLSSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="moe.matsuri.nb4a.proxy.anytls.AnyTLSSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="moe.matsuri.nb4a.proxy.config.ConfigSettingActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.GroupSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.RouteSettingsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.AssetsActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.AppListActivity"
-            android:configChanges="uiMode" />
-        <activity
-            android:name=".QuickToggleShortcut"
-            android:excludeFromRecents="true"
-            android:exported="true"
-            android:label="@string/quick_toggle"
-            android:launchMode="singleTask"
-            android:process=":bg"
-            android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar">
-            <intent-filter>
-                <action android:name="android.intent.action.CREATE_SHORTCUT" />
-            </intent-filter>
-        </activity>
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.QuickEnableShortcut"
-            android:excludeFromRecents="true"
-            android:exported="true"
-            android:label="@string/quick_enable"
-            android:launchMode="singleTask"
-            android:process=":bg"
-            android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.QuickDisableShortcut"
-            android:excludeFromRecents="true"
-            android:exported="true"
-            android:label="@string/quick_disable"
-            android:launchMode="singleTask"
-            android:process=":bg"
-            android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.AppManagerActivity"
-            android:configChanges="uiMode"
-            android:excludeFromRecents="true"
-            android:label="@string/proxied_apps"
-            android:launchMode="singleTask"
-            android:parentActivityName=".ui.MainActivity" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.ScannerActivity"
-            android:configChanges="uiMode"
-            android:excludeFromRecents="true"
-            android:label="@string/add_profile_methods_scan_qr_code"
-            android:launchMode="singleTask"
-            android:parentActivityName="io.nekohasekai.sagernet.ui.MainActivity" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.ProfileSelectActivity"
-            android:configChanges="uiMode"
-            android:label="@string/select_profile"
-            android:launchMode="singleTask"
-            android:parentActivityName="io.nekohasekai.sagernet.ui.MainActivity" />
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.StunActivity"
-            android:configChanges="uiMode"
-            android:launchMode="singleTask"
-            android:parentActivityName="io.nekohasekai.sagernet.ui.MainActivity" />
+        onMainDispatcher {
 
-        <activity
-            android:name="io.nekohasekai.sagernet.ui.SwitchActivity"
-            android:configChanges="uiMode"
-            android:excludeFromRecents="true"
-            android:launchMode="singleInstance"
-            android:theme="@style/Theme.SagerNet.Dialog" />
+            displayFragmentWithId(R.id.nav_group)
 
-        <service
-            android:name="io.nekohasekai.sagernet.FloatingToggleService"
-            android:exported="false" />
+            MaterialAlertDialogBuilder(this@MainActivity).setTitle(R.string.subscription_import)
+                .setMessage(getString(R.string.subscription_import_message, name))
+                .setPositiveButton(R.string.yes) { _, _ ->
+                    runOnDefaultDispatcher {
+                        finishImportSubscription(group)
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
 
-        <service
-            android:name="io.nekohasekai.sagernet.bg.ProxyService"
-            android:exported="false"
-            android:foregroundServiceType="systemExempted"
-            android:process=":bg"
-            tools:ignore="ForegroundServicePermission" />
+        }
 
-        <service
-            android:name="io.nekohasekai.sagernet.bg.VpnService"
-            android:exported="false"
-            android:foregroundServiceType="systemExempted"
-            android:label="@string/app_name"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            android:process=":bg"
-            tools:ignore="ForegroundServicePermission">
+    }
 
-            <intent-filter>
-                <action android:name="android.net.VpnService" />
-            </intent-filter>
-        </service>
+    private suspend fun finishImportSubscription(subscription: ProxyGroup) {
+        GroupManager.createGroup(subscription)
+        GroupUpdater.startUpdate(subscription, true)
+    }
 
-        <service
-            android:name="io.nekohasekai.sagernet.bg.TileService"
-            android:exported="true"
-            android:foregroundServiceType="systemExempted"
-            android:icon="@drawable/ic_service_active"
-            android:label="@string/tile_title"
-            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
-            android:process=":bg"
-            tools:ignore="ForegroundServicePermission"
-            tools:targetApi="n">
-            <intent-filter>
-                <action android:name="android.service.quicksettings.action.QS_TILE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
-                android:value="true" />
-        </service>
+    suspend fun importProfile(uri: Uri) {
+        val profile = try {
+            parseProxies(uri.toString()).getOrNull(0) ?: error(getString(R.string.no_proxies_found))
+        } catch (e: Exception) {
+            onMainDispatcher {
+                alert(e.readableMessage).show()
+            }
+            return
+        }
 
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.cache"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/cache_paths" />
-        </provider>
+        onMainDispatcher {
+            MaterialAlertDialogBuilder(this@MainActivity).setTitle(R.string.profile_import)
+                .setMessage(getString(R.string.profile_import_message, profile.displayName()))
+                .setPositiveButton(R.string.yes) { _, _ ->
+                    runOnDefaultDispatcher {
+                        finishImportProfile(profile)
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
 
-        <provider
-            android:name="androidx.startup.InitializationProvider"
-            android:authorities="${applicationId}.androidx-startup"
-            tools:node="remove" />
+    }
 
-        <receiver
-            android:name="io.nekohasekai.sagernet.BootReceiver"
-            android:enabled="false"
-            android:exported="true"
-            android:process=":bg">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
+    private suspend fun finishImportProfile(profile: AbstractBean) {
+        val targetId = DataStore.selectedGroupForImport()
 
-        <service
-            android:name="androidx.room.MultiInstanceInvalidationService"
-            android:process=":bg" />
+        ProfileManager.createProfile(targetId, profile)
 
-    </application>
+        onMainDispatcher {
+            displayFragmentWithId(R.id.nav_configuration)
 
-</manifest>
+            snackbar(resources.getQuantityString(R.plurals.added, 1, 1)).show()
+        }
+    }
+
+    override fun missingPlugin(profileName: String, pluginName: String) {
+        val pluginEntity = PluginEntry.find(pluginName)
+
+        // unknown exe or neko plugin
+        if (pluginEntity == null) {
+            snackbar(getString(R.string.plugin_unknown, pluginName)).show()
+            return
+        }
+
+        // official exe
+
+        MaterialAlertDialogBuilder(this).setTitle(R.string.missing_plugin)
+            .setMessage(
+                getString(
+                    R.string.profile_requiring_plugin, profileName, pluginEntity.displayName
+                )
+            )
+            .setPositiveButton(R.string.action_download) { _, _ ->
+                showDownloadDialog(pluginEntity)
+            }
+            .setNeutralButton(android.R.string.cancel, null)
+            .setNeutralButton(R.string.action_learn_more) { _, _ ->
+                launchCustomTab("https://matsuridayo.github.io/nb4a-plugin/")
+            }
+            .show()
+    }
+
+    private fun showDownloadDialog(pluginEntry: PluginEntry) {
+        var index = 0
+        var playIndex = -1
+        var fdroidIndex = -1
+
+        val items = mutableListOf<String>()
+        if (pluginEntry.downloadSource.playStore) {
+            items.add(getString(R.string.install_from_play_store))
+            playIndex = index++
+        }
+        if (pluginEntry.downloadSource.fdroid) {
+            items.add(getString(R.string.install_from_fdroid))
+            fdroidIndex = index++
+        }
+
+        items.add(getString(R.string.download))
+        val downloadIndex = index
+
+        MaterialAlertDialogBuilder(this).setTitle(pluginEntry.name)
+            .setItems(items.toTypedArray()) { _, which ->
+                when (which) {
+                    playIndex -> launchCustomTab("https://play.google.com/store/apps/details?id=${pluginEntry.packageName}")
+                    fdroidIndex -> launchCustomTab("https://f-droid.org/packages/${pluginEntry.packageName}/")
+                    downloadIndex -> launchCustomTab(pluginEntry.downloadSource.downloadLink)
+                }
+            }
+            .show()
+    }
+
+    override fun onNavigationItemSelected(item: MenuItem): Boolean {
+        if (item.isChecked) binding.drawerLayout.closeDrawers() else {
+            return displayFragmentWithId(item.itemId)
+        }
+        return true
+    }
+
+
+    @SuppressLint("CommitTransaction")
+    fun displayFragment(fragment: ToolbarFragment) {
+        if (fragment is ConfigurationFragment) {
+            binding.stats.allowShow = true
+            binding.fab.show()
+        } else if (!DataStore.showBottomBar) {
+            binding.stats.allowShow = false
+            binding.stats.performHide()
+            binding.fab.hide()
+        }
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.fragment_holder, fragment)
+            .commitAllowingStateLoss()
+        binding.drawerLayout.closeDrawers()
+    }
+
+    fun displayFragmentWithId(@IdRes id: Int): Boolean {
+        when (id) {
+            R.id.nav_configuration -> {
+                displayFragment(ConfigurationFragment())
+            }
+
+            R.id.nav_group -> displayFragment(GroupFragment())
+            R.id.nav_route -> displayFragment(RouteFragment())
+            R.id.nav_settings -> displayFragment(SettingsFragment())
+            R.id.nav_traffic -> displayFragment(WebviewFragment())
+            R.id.nav_tools -> displayFragment(ToolsFragment())
+            R.id.nav_logcat -> displayFragment(LogcatFragment())
+            R.id.nav_faq -> {
+                launchCustomTab("https://matsuridayo.github.io/")
+                return false
+            }
+
+            R.id.nav_about -> displayFragment(AboutFragment())
+            R.id.nav_tuiguang -> {
+                launchCustomTab("https://neko-box.pages.dev/喵")
+                return false
+            }
+
+            else -> return false
+        }
+        navigation.menu.findItem(id).isChecked = true
+        return true
+    }
+
+    private fun changeState(
+        state: BaseService.State,
+        msg: String? = null,
+        animate: Boolean = false,
+    ) {
+        DataStore.serviceState = state
+
+        binding.fab.changeState(state, DataStore.serviceState, animate)
+        binding.stats.changeState(state)
+        if (msg != null) snackbar(getString(R.string.vpn_error, msg)).show()
+    }
+
+    override fun snackbarInternal(text: CharSequence): Snackbar {
+        return Snackbar.make(binding.coordinator, text, Snackbar.LENGTH_LONG).apply {
+            if (binding.fab.isShown) {
+                anchorView = binding.fab
+            }
+            // TODO
+        }
+    }
+
+    override fun stateChanged(state: BaseService.State, profileName: String?, msg: String?) {
+        changeState(state, msg, true)
+    }
+
+    val connection = SagerConnection(SagerConnection.CONNECTION_ID_MAIN_ACTIVITY_FOREGROUND, true)
+    override fun onServiceConnected(service: ISagerNetService) = changeState(
+        try {
+            BaseService.State.values()[service.state]
+        } catch (_: RemoteException) {
+            BaseService.State.Idle
+        }
+    )
+
+    override fun onServiceDisconnected() = changeState(BaseService.State.Idle)
+    override fun onBinderDied() {
+        connection.disconnect(this)
+        connection.connect(this, this)
+    }
+
+    private val connect = registerForActivityResult(VpnRequestActivity.StartService()) {
+        if (it) snackbar(R.string.vpn_permission_denied).show()
+    }
+
+    // may NOT called when app is in background
+    // ONLY do UI update here, write DB in bg process
+    override fun cbSpeedUpdate(stats: SpeedDisplayData) {
+        binding.stats.updateSpeed(stats.txRateProxy, stats.rxRateProxy)
+    }
+
+    override fun cbTrafficUpdate(data: TrafficData) {
+        runOnDefaultDispatcher {
+            ProfileManager.postUpdate(data)
+        }
+    }
+
+    override fun cbSelectorUpdate(id: Long) {
+        val old = DataStore.selectedProxy
+        DataStore.selectedProxy = id
+        DataStore.currentProfile = id
+        runOnDefaultDispatcher {
+            ProfileManager.postUpdate(old, true)
+            ProfileManager.postUpdate(id, true)
+        }
+    }
+
+    override fun onPreferenceDataStoreChanged(store: PreferenceDataStore, key: String) {
+        when (key) {
+            Key.SERVICE_MODE -> onBinderDied()
+            Key.PROXY_APPS, Key.BYPASS_MODE, Key.INDIVIDUAL -> {
+                if (DataStore.serviceState.canStop) {
+                    snackbar(getString(R.string.need_reload)).setAction(R.string.apply) {
+                        SagerNet.reloadService()
+                    }.show()
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        connection.updateConnectionId(SagerConnection.CONNECTION_ID_MAIN_ACTIVITY_FOREGROUND)
+        super.onStart()
+    }
+
+    override fun onStop() {
+        connection.updateConnectionId(SagerConnection.CONNECTION_ID_MAIN_ACTIVITY_BACKGROUND)
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        GroupManager.userInterface = null
+        DataStore.configurationStore.unregisterChangeListener(this)
+        connection.disconnect(this)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (super.onKeyDown(keyCode, event)) return true
+                binding.drawerLayout.open()
+                navigation.requestFocus()
+            }
+
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (binding.drawerLayout.isOpen) {
+                    binding.drawerLayout.close()
+                    return true
+                }
+            }
+        }
+
+        if (super.onKeyDown(keyCode, event)) return true
+        if (binding.drawerLayout.isOpen) return false
+
+        val fragment =
+            supportFragmentManager.findFragmentById(R.id.fragment_holder) as? ToolbarFragment
+        return fragment != null && fragment.onKeyDown(keyCode, event)
+    }
+
+}
