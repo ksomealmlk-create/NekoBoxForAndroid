@@ -134,10 +134,95 @@ jobs:
 
           ls -lh app/libs/libcore.aar
 
-      - name: Gradle Cache
-        uses: actions/cache@v4
+      - name: Prepare Project
+        env:
+          BUILD_PLUGIN: none
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          echo "ndk.dir=${ANDROID_HOME}/ndk/25.0.8775105" >> local.properties
+
+          chmod +x ./run
+          chmod +x ./gradlew
+
+          ./run init action gradle
+
+      - name: Build Preview Release
+        shell: bash
+        env:
+          BUILD_PLUGIN: none
+        run: |
+          ./gradlew app:assemblePreviewRelease \
+            --no-daemon \
+            --stacktrace 2>&1 | tee build.log
+
+      - name: Show Errors
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== KOTLIN / KSP ERRORS ====="
+          grep -nE "^e: |\[ksp\]|error:" build.log | head -n 40 || true
+          echo "===== WHAT WENT WRONG ====="
+          grep -n -A 15 "What went wrong" build.log | head -n 40 || true
+
+      - name: Find APK
+        shell: bash
+        run: |
+          echo "Searching for APK..."
+
+          find app/build/outputs -type f -name "*.apk" -print
+
+          APK=$(find app/build/outputs -type f \
+            -name '*arm64-v8a*.apk' \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            APK=$(find app/build/outputs -type f \
+              -name "*.apk" \
+              | head -n 1)
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK was generated."
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          mkdir -p release-apk
+          cp "$APK" release-apk/
+
+      - name: Sign APK
+        shell: bash
+        run: |
+          BT=$ANDROID_HOME/build-tools/35.0.0
+          cd release-apk
+
+          keytool -genkeypair \
+            -keystore ../debug.keystore \
+            -storepass android -keypass android \
+            -alias key0 -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          for f in *-unsigned.apk; do
+            [ -e "$f" ] || continue
+            BASE="${f%-unsigned.apk}"
+            $BT/zipalign -f -p 4 "$f" "$BASE-aligned.apk"
+            $BT/apksigner sign \
+              --ks ../debug.keystore \
+              --ks-pass pass:android \
+              --key-pass pass:android \
+              --out "$BASE-signed.apk" \
+              "$BASE-aligned.apk"
+            rm -f "$f" "$BASE-aligned.apk" "$BASE-signed.apk.idsig"
+          done
+
+          ls -lh
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-oss-${{ runner.os }}-${{ hashFiles('**/*.gradle', '**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties
+          name: APKs
+          path: release-apk/*.apk
+          if-no-files-found: error
